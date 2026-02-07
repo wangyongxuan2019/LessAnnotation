@@ -1,11 +1,13 @@
 """主窗口模块"""
 
-from datetime import datetime
+import sys
+import time
+from pathlib import Path
 
 from PyQt5.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QSlider, QComboBox, QSpinBox,
-    QMessageBox, QFileDialog, QDesktopWidget
+    QMessageBox, QDesktopWidget, QSplitter, QInputDialog
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QKeySequence
@@ -32,13 +34,78 @@ class MainWindow(QMainWindow):
         self.current_id = None
         self.playing = False
         self.mark_step = 0  # 空格键标记步骤: 0=开始帧, 1=IC, 2=MKF, 3=结束帧
+        self.play_start_time = 0  # 播放开始时间
+        self.play_start_frame = 0  # 播放开始帧
+        self._loading = False  # 加载数据时阻止自动保存
         self.timer = QTimer()
         self.timer.timeout.connect(self._tick)
         self._setup_ui()
         # 连接标注数据引用，使视频列表可以显示标注状态
-        self.video_list.set_annotations_ref(self.data_manager.annotations)
+        self.video_list.set_data_manager(self.data_manager)
+        # 检查专家姓名
+        self._check_expert()
         # 自动加载上次打开的文件夹
         self.video_list.auto_load_last_folder()
+
+    def _check_expert(self):
+        """检查并设置专家姓名"""
+        if not self.data_manager.expert_id:
+            self._request_expert_name()
+        else:
+            self._update_expert_display()
+
+    def _request_expert_name(self):
+        """请求用户输入专家姓名"""
+        while True:
+            name, ok = QInputDialog.getText(
+                self, "专家信息",
+                "请输入您的姓名（用于标识标注数据）:",
+                text=""
+            )
+            if ok and name.strip():
+                self.data_manager.set_expert(name.strip())
+                self._update_expert_display()
+                break
+            elif not ok:
+                # 用户点击取消，退出程序
+                QMessageBox.warning(self, "警告", "必须输入专家姓名才能使用本软件")
+                # 继续循环，强制输入
+
+    def _update_expert_display(self):
+        """更新专家姓名显示"""
+        expert_name = self.data_manager.expert_id or "未设置"
+        self.expert_label.setText(f"👤 专家: {expert_name}")
+
+        # 设置提示词显示当前文件路径
+        if self.data_manager.annotation_path:
+            self.expert_label.setToolTip(f"标注文件: {self.data_manager.annotation_path}")
+        else:
+            self.expert_label.setToolTip("")
+
+        # 强制刷新显示
+        self.expert_label.update()
+        self.expert_label.repaint()
+        from PyQt5.QtWidgets import QApplication
+        QApplication.processEvents()
+
+    def _edit_expert_name(self):
+        """修改专家姓名"""
+        current_name = self.data_manager.expert_id or ""
+        name, ok = QInputDialog.getText(
+            self, "修改专家姓名",
+            "请输入新的专家姓名:",
+            text=current_name
+        )
+        if ok and name.strip():
+            new_name = name.strip()
+            if new_name != current_name:
+                self.data_manager.set_expert(new_name)
+                self._update_expert_display()
+                self._update_stats()
+                self.video_list.refresh_all_status()
+                # 重新加载当前视频的标注数据（新专家的数据）
+                self._load_current()
+                self.statusBar().showMessage(f"专家姓名已修改为: {new_name}")
 
     def _setup_ui(self):
         self.setWindowTitle("LESS视频标注工具")
@@ -54,15 +121,27 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         main = QHBoxLayout(central)
-        main.setSpacing(15)
-        main.setContentsMargins(15, 15, 15, 15)
+        main.setSpacing(0)
+        main.setContentsMargins(10, 10, 10, 10)
 
-        # 左侧：视频列表 - 加宽
+        # 使用QSplitter实现可调整大小的布局
+        splitter = QSplitter(Qt.Horizontal)
+        splitter.setHandleWidth(6)
+        splitter.setStyleSheet("""
+            QSplitter::handle {
+                background: #E0E0E0;
+                border-radius: 3px;
+            }
+            QSplitter::handle:hover {
+                background: #2196F3;
+            }
+        """)
+
+        # 左侧：视频列表（可折叠树形结构）
         self.video_list = VideoListPanel(data_manager=self.data_manager)
-        self.video_list.setMinimumWidth(280)
-        self.video_list.setMaximumWidth(320)
+        self.video_list.setMinimumWidth(200)
         self.video_list.video_selected.connect(self._on_video)
-        main.addWidget(self.video_list)
+        splitter.addWidget(self.video_list)
 
         # 中间：视频区域
         video_panel = QWidget()
@@ -70,6 +149,39 @@ class MainWindow(QMainWindow):
         vl = QVBoxLayout(video_panel)
         vl.setSpacing(12)
         vl.setContentsMargins(15, 15, 15, 15)
+
+        # 专家信息栏
+        expert_bar = QWidget()
+        expert_bar.setStyleSheet("background: #E8F5E9; border-radius: 8px; padding: 8px;")
+        expert_layout = QHBoxLayout(expert_bar)
+        expert_layout.setContentsMargins(12, 8, 12, 8)
+        expert_layout.setSpacing(10)
+
+        self.expert_label = QLabel("👤 专家: ")
+        self.expert_label.setStyleSheet("font-size: 14px; font-weight: bold; color: #2E7D32;")
+        expert_layout.addWidget(self.expert_label)
+
+        # 修改姓名按钮
+        edit_expert_btn = QPushButton("修改")
+        edit_expert_btn.setStyleSheet("""
+            QPushButton {
+                background: #4CAF50; color: white; border: none;
+                padding: 4px 12px; border-radius: 4px; font-size: 12px;
+            }
+            QPushButton:hover { background: #388E3C; }
+        """)
+        edit_expert_btn.setToolTip("修改专家姓名")
+        edit_expert_btn.clicked.connect(self._edit_expert_name)
+        expert_layout.addWidget(edit_expert_btn)
+
+        expert_layout.addStretch()
+
+        # 统计信息
+        self.stats_label = QLabel("")
+        self.stats_label.setStyleSheet("color: #666; font-size: 12px;")
+        expert_layout.addWidget(self.stats_label)
+
+        vl.addWidget(expert_bar)
 
         # 双视频 - 占据更多空间
         videos = QHBoxLayout()
@@ -125,6 +237,7 @@ class MainWindow(QMainWindow):
         self.speed.setCurrentIndex(2)
         self.speed.setStyleSheet("padding: 10px; font-size: 16px; min-width: 90px;")
         self.speed.setToolTip("调整视频播放速度")
+        self.speed.currentIndexChanged.connect(self._on_speed_changed)
         cl.addWidget(self.speed)
 
         self.pose_btn = QPushButton("骨骼: 开" if self.pose_detector else "骨骼: 不可用")
@@ -162,12 +275,11 @@ class MainWindow(QMainWindow):
 
         vl.addWidget(kf)
 
-        main.addWidget(video_panel, 1)
+        splitter.addWidget(video_panel)
 
         # 右侧：评分 - 加宽以使每个评分项占一行
         right = QWidget()
-        right.setMinimumWidth(480)
-        right.setMaximumWidth(550)
+        right.setMinimumWidth(420)
         rl = QVBoxLayout(right)
         rl.setSpacing(12)
         rl.setContentsMargins(0, 0, 0, 0)
@@ -189,43 +301,38 @@ class MainWindow(QMainWindow):
         sl.addStretch()
         rl.addWidget(score_box)
 
-        # 按钮
-        btns = QHBoxLayout()
-        save_btns = [
-            ("💾 保存", self._save, "#2196F3", "保存当前标注 (Ctrl+S)"),
-            ("保存并下一个 ▶", self._save_next, "#4CAF50", "保存当前标注并自动切换到下一个视频")
-        ]
-        for txt, fn, color, tip in save_btns:
-            b = QPushButton(txt)
-            b.setStyleSheet(f"""
-                QPushButton {{ background: {color}; color: white; padding: 16px 30px;
-                font-size: 18px; font-weight: bold; border: none; border-radius: 8px; }}
-                QPushButton:hover {{ opacity: 0.9; }}
-            """)
-            b.setToolTip(tip)
-            b.clicked.connect(fn)
-            btns.addWidget(b)
-        rl.addLayout(btns)
-
         # 导出
         exp = QHBoxLayout()
-        export_btns = [
-            ("导出CSV", self._csv, "将所有标注数据导出为CSV表格文件"),
-            ("导出JSON", self._json, "将所有标注数据导出为JSON文件")
-        ]
-        for txt, fn, tip in export_btns:
-            b = QPushButton(txt)
-            b.setStyleSheet("""
-                QPushButton { background: #607D8B; color: white; padding: 14px 24px;
-                font-size: 16px; border: none; border-radius: 6px; }
-                QPushButton:hover { background: #455A64; }
-            """)
-            b.setToolTip(tip)
-            b.clicked.connect(fn)
-            exp.addWidget(b)
+        open_file_btn = QPushButton("📂 打开标注文件")
+        open_file_btn.setStyleSheet("""
+            QPushButton { background: #607D8B; color: white; padding: 14px 24px;
+            font-size: 16px; border: none; border-radius: 6px; }
+            QPushButton:hover { background: #455A64; }
+        """)
+        open_file_btn.setToolTip("打开标注文件所在的文件夹")
+        open_file_btn.clicked.connect(self._open_annotation_file)
+        exp.addWidget(open_file_btn)
+
         rl.addLayout(exp)
 
-        main.addWidget(right)
+        # 切换专家
+        load_exp = QHBoxLayout()
+        load_expert_btn = QPushButton("切换专家")
+        load_expert_btn.setStyleSheet("""
+            QPushButton { background: #FF5722; color: white; padding: 14px 24px;
+            font-size: 16px; border: none; border-radius: 6px; }
+            QPushButton:hover { background: #E64A19; }
+        """)
+        load_expert_btn.setToolTip("切换到其他专家查看或修改其标注")
+        load_expert_btn.clicked.connect(self._load_expert_scores)
+        load_exp.addWidget(load_expert_btn)
+        rl.addLayout(load_exp)
+
+        splitter.addWidget(right)
+
+        # 设置splitter初始比例 (视频列表:视频区域:评分 = 1:4:2)
+        splitter.setSizes([250, 800, 450])
+        main.addWidget(splitter)
 
         # 快捷键
         QShortcut(QKeySequence(Qt.Key_Space), self, self._mark_next)  # 空格键顺序标记
@@ -236,7 +343,6 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("I"), self, self._mark_ic)
         QShortcut(QKeySequence("M"), self, self._mark_mkf)
         QShortcut(QKeySequence("E"), self, self._mark_end)
-        QShortcut(QKeySequence("Ctrl+S"), self, self._save)
 
         self.statusBar().showMessage("就绪 - 请选择视频文件夹")
         self.statusBar().setStyleSheet("font-size: 16px; padding: 6px;")
@@ -288,19 +394,27 @@ class MainWindow(QMainWindow):
     # ---- 视频控制 ----
 
     def _on_video(self, front, side):
+        # 停止播放
+        if self.playing:
+            self.timer.stop()
+            self.playing = False
+            self.play_btn.setText("▶")
+
         if self.current_id:
             self._auto_save()
+
         self.front.load_video(front)
         if side:
             self.side.load_video(side)
         self.slider.setMaximum(max(1, self.front.total_frames - 1))
+        self.slider.setValue(0)
         self.current_id = self.video_list.get_current_id()
         self._load_current()
 
         # 显示当前视频信息
         info = self.video_list.get_current_info()
         if info:
-            msg = f"已加载: 测试者 {info['subject']} | 动作 {info['motion']} | 次数 {info['trial']}"
+            msg = f"已加载: 测试者 {info['subject']} | 动作 {info['motion']}"
             if not side:
                 msg += " (仅正面视频)"
         else:
@@ -344,23 +458,42 @@ class MainWindow(QMainWindow):
         else:
             # 如果视频已结束，从头开始播放
             if self.front.current_frame >= self.front.total_frames - 1:
-                self._goto(0)
-            speeds = {0: 0.25, 1: 0.5, 2: 1.0, 3: 1.5, 4: 2.0}
-            interval = int(1000 / (self.front.fps * speeds.get(self.speed.currentIndex(), 1)))
-            self.timer.start(interval)
+                self._show_frame(0)
+            # 记录播放开始时间和帧
+            self.play_start_time = time.time()
+            self.play_start_frame = self.front.current_frame
+            # 使用固定的刷新间隔（约30fps），实际帧由时间计算
+            self.timer.start(33)
             self.play_btn.setText("⏸")
             self.play_btn.setToolTip("暂停播放")
         self.playing = not self.playing
 
     def _tick(self):
-        if self.front.current_frame >= self.front.total_frames - 1:
+        # 基于时间计算应该显示的帧
+        speeds = {0: 0.25, 1: 0.5, 2: 1.0, 3: 1.5, 4: 2.0}
+        speed = speeds.get(self.speed.currentIndex(), 1.0)
+        elapsed = time.time() - self.play_start_time
+        target_frame = self.play_start_frame + int(elapsed * self.front.fps * speed)
+
+        if target_frame >= self.front.total_frames - 1:
             self.timer.stop()
             self.playing = False
             self.play_btn.setText("▶")
             self.play_btn.setToolTip("重新播放视频")
+            self._show_frame(self.front.total_frames - 1)
             self.statusBar().showMessage("视频播放完毕，点击播放按钮重新播放")
             return
-        self._step(1)
+
+        # 只有当目标帧变化时才更新显示
+        if target_frame != self.front.current_frame:
+            self._show_frame(target_frame)
+
+    def _on_speed_changed(self, index):
+        """播放速度改变时重置时间基准"""
+        if self.playing:
+            # 重置时间基准，从当前帧继续播放
+            self.play_start_time = time.time()
+            self.play_start_frame = self.front.current_frame
 
     def _toggle_pose(self):
         en = self.pose_btn.isChecked()
@@ -375,23 +508,23 @@ class MainWindow(QMainWindow):
 
     def _mark_start(self):
         self.start_frame.setValue(self.front.current_frame)
-        self.statusBar().showMessage(f"开始帧已标记: {self.front.current_frame} | 下一步: 按空格标记IC帧")
         self.mark_step = 1
+        self._auto_save()
 
     def _mark_end(self):
         self.end_frame.setValue(self.front.current_frame)
-        self.statusBar().showMessage(f"结束帧已标记: {self.front.current_frame} | 所有关键帧已标记完成")
         self.mark_step = 0
+        self._auto_save()
 
     def _mark_ic(self):
         self.ic.setValue(self.front.current_frame)
-        self.statusBar().showMessage(f"IC帧已标记: {self.front.current_frame} | 下一步: 按空格标记MKF帧")
         self.mark_step = 2
+        self._auto_save()
 
     def _mark_mkf(self):
         self.mkf.setValue(self.front.current_frame)
-        self.statusBar().showMessage(f"MKF帧已标记: {self.front.current_frame} | 下一步: 按空格标记结束帧")
         self.mark_step = 3
+        self._auto_save()
 
     def _mark_next(self):
         """空格键顺序标记: 开始帧 -> IC帧 -> MKF帧 -> 结束帧"""
@@ -408,6 +541,8 @@ class MainWindow(QMainWindow):
 
     def _on_score(self, t):
         self.total.setText(str(t))
+        # 自动保存
+        self._auto_save()
 
     # ---- 数据管理 ----
 
@@ -425,12 +560,22 @@ class MainWindow(QMainWindow):
         )
 
     def _load_current(self):
+        """加载当前视频的标注数据"""
+        self._loading = True  # 阻止自动保存
+
+        # 先清空所有UI
         self.start_frame.setValue(0)
         self.ic.setValue(0)
         self.mkf.setValue(0)
         self.end_frame.setValue(0)
         self.mark_step = 0
         self.scoring.clear_scores()
+        self.total.setText("0")
+
+        # 更新统计信息
+        self._update_stats()
+
+        # 加载当前视频的标注
         if self.current_id:
             d = self.data_manager.get_annotation(self.current_id)
             if d:
@@ -439,45 +584,143 @@ class MainWindow(QMainWindow):
                 self.ic.setValue(kf.get('ic', 0))
                 self.mkf.setValue(kf.get('mkf', 0))
                 self.end_frame.setValue(kf.get('end', 0))
-                self.scoring.set_scores(d.get('scores', {}))
-                self.total.setText(str(d.get('total_score', 0)))
+
+                # 设置评分
+                scores = d.get('scores', {})
+                self.scoring.set_scores(scores)
+
+                # 设置总分 - 从评分面板计算，确保与显示一致
+                self.total.setText(str(self.scoring.get_total_score()))
+
                 if kf.get('end', 0) > 0:
                     self.mark_step = 0
 
-    def _auto_save(self):
-        if self.current_id:
-            self.data_manager.set_annotation(self.current_id, self._get_data())
+        self._loading = False  # 恢复自动保存
 
-    def _save(self):
-        if not self.current_id:
-            QMessageBox.warning(self, "警告", "请先选择视频")
+        # 强制刷新UI
+        self.scoring.repaint()
+        from PyQt5.QtWidgets import QApplication
+        QApplication.processEvents()
+
+    def _update_stats(self):
+        """更新统计信息显示"""
+        completed = self.data_manager.get_completed_count()
+        draft = self.data_manager.get_draft_count()
+        total = len(self.video_list.video_pairs) if hasattr(self.video_list, 'video_pairs') else 0
+        self.stats_label.setText(f"已标注: {completed} | 待完善: {draft} | 总计: {total}")
+
+    def _auto_save(self):
+        """自动保存 - 自动判断完成状态"""
+        if self._loading:  # 加载数据时不保存
             return
-        self.data_manager.set_annotation(self.current_id, self._get_data())
+        if not self.current_id or not self.data_manager.expert_id:
+            return
+
+        data = self._get_data()
+        # 自动判断是否完成
+        data['completed'] = DataManager.is_annotation_complete(data)
+
+        self.data_manager.set_annotation(self.current_id, data)
         self.data_manager.save_annotations()
         self.video_list.mark_done(self.current_id)
-        self.statusBar().showMessage(f"已保存: {self.current_id}")
+        self._update_stats()
 
-    def _save_next(self):
-        self._save()
-        self.video_list.next_video()
+        # 状态栏显示
+        if data['completed']:
+            self.statusBar().showMessage(f"已标注: {self.current_id}")
+        else:
+            self.statusBar().showMessage(f"待完善: {self.current_id}")
 
-    def _csv(self):
-        if not self.data_manager.annotations:
-            QMessageBox.information(self, "提示", "没有数据")
+    def _open_annotation_file(self):
+        """打开标注文件所在文件夹"""
+        import os
+        import subprocess
+
+        file_path = self.data_manager.annotation_path
+        if not file_path:
+            QMessageBox.information(self, "提示", "请先选择视频文件夹并设置专家姓名")
             return
-        p, _ = QFileDialog.getSaveFileName(self, "导出", f"less_{datetime.now():%Y%m%d_%H%M%S}.csv", "CSV (*.csv)")
-        if p:
-            count = self.data_manager.export_csv(p)
-            QMessageBox.information(self, "成功", f"已导出 {count} 条")
 
-    def _json(self):
-        if not self.data_manager.annotations:
-            QMessageBox.information(self, "提示", "没有数据")
+        if not file_path.exists():
+            # 文件不存在，打开文件夹
+            folder = file_path.parent
+            if folder.exists():
+                if os.name == 'nt':
+                    os.startfile(str(folder))
+                elif sys.platform == 'darwin':
+                    subprocess.run(['open', str(folder)])
+                else:
+                    subprocess.run(['xdg-open', str(folder)])
+            else:
+                QMessageBox.information(self, "提示", "标注文件夹尚未创建")
             return
-        p, _ = QFileDialog.getSaveFileName(self, "导出", f"less_{datetime.now():%Y%m%d_%H%M%S}.json", "JSON (*.json)")
-        if p:
-            count = self.data_manager.export_json(p)
-            QMessageBox.information(self, "成功", f"已导出 {count} 条")
+
+        # 打开文件所在文件夹并选中文件
+        if os.name == 'nt':  # Windows
+            subprocess.run(['explorer', '/select,', str(file_path)])
+        elif sys.platform == 'darwin':  # macOS
+            subprocess.run(['open', '-R', str(file_path)])
+        else:  # Linux
+            subprocess.run(['xdg-open', str(file_path.parent)])
+
+    def _load_expert_scores(self):
+        """切换到其他专家"""
+        # 获取可用的专家评分文件
+        expert_files = self.data_manager.get_expert_score_files()
+
+        # 过滤掉当前专家的文件
+        current_expert = self.data_manager.expert_id
+        if current_expert:
+            expert_files = [(name, fname, path) for name, fname, path in expert_files
+                           if name.strip() != current_expert.strip()]
+
+        if not expert_files:
+            QMessageBox.information(
+                self, "提示",
+                "没有找到其他专家的评分文件"
+            )
+            return
+
+        # 让用户选择专家
+        if len(expert_files) > 1:
+            items = [name for name, fname, _ in expert_files]
+            item, ok = QInputDialog.getItem(
+                self, "切换专家",
+                "请选择要切换到的专家:",
+                items, 0, False
+            )
+            if not ok:
+                return
+            selected_expert = item
+        else:
+            selected_expert = expert_files[0][0]
+
+        # 确认切换
+        reply = QMessageBox.question(
+            self, "切换专家",
+            f"确定要切换到专家「{selected_expert}」吗？\n\n当前专家的数据已自动保存。",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        # 切换专家
+        success, message = self.data_manager.switch_to_expert(selected_expert)
+
+        if success:
+            # 更新UI
+            self._update_expert_display()
+            self._update_stats()
+            self.video_list.refresh_all_status()
+
+            # 重新加载当前视频的标注数据
+            self._load_current()
+
+            # 显示切换成功信息
+            QMessageBox.information(self, "切换成功", message)
+            self.statusBar().showMessage(f"已切换到专家: {selected_expert}")
+        else:
+            QMessageBox.warning(self, "切换失败", message)
 
     def closeEvent(self, e):
         self._auto_save()

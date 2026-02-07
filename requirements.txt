@@ -13,10 +13,5 @@ numpy>=1.21.0
 Pillow>=9.0.0
 
 # 姿态检测 - MediaPipe
-# 注意：如果安装失败，请尝试以下命令：
-#   pip install mediapipe --upgrade
-# 或指定版本：
-#   pip install mediapipe==0.10.9
-#
 # Windows用户可能需要安装Visual C++ Redistributable
-mediapipe
+mediapipe>=0.10.0

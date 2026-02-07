@@ -1,9 +1,9 @@
-"""MediaPipe兼容性处理和全局配置"""
+"""姿态检测配置和兼容性处理"""
 
 import urllib.request
 from pathlib import Path
 
-# ============ MediaPipe 兼容性处理 ============
+# ============ MediaPipe 配置 ============
 MEDIAPIPE_AVAILABLE = False
 MEDIAPIPE_MODE = None  # 'legacy' or 'tasks'
 
@@ -11,7 +11,6 @@ mp = None
 mp_python = None
 mp_vision = None
 
-# 尝试导入MediaPipe
 try:
     import mediapipe as _mp
     mp = _mp
@@ -22,7 +21,7 @@ try:
         _test_drawing = mp.solutions.drawing_utils
         MEDIAPIPE_AVAILABLE = True
         MEDIAPIPE_MODE = 'legacy'
-        print("MediaPipe已加载 (Legacy API)")
+        print("MediaPipe 已加载 (Legacy API)")
     except AttributeError:
         pass
 
@@ -35,15 +34,18 @@ try:
             mp_vision = _mp_vision
             MEDIAPIPE_AVAILABLE = True
             MEDIAPIPE_MODE = 'tasks'
-            print("MediaPipe已加载 (Tasks API)")
+            print("MediaPipe 已加载 (Tasks API)")
         except ImportError:
             pass
 
-except ImportError as e:
-    print(f"MediaPipe导入失败: {e}")
-    print("请运行: pip install mediapipe")
+except ImportError:
+    print("MediaPipe 未安装")
 
-# 模型文件路径（仅Tasks API需要）
+if not MEDIAPIPE_AVAILABLE:
+    print(">>> 警告: MediaPipe 不可用!")
+
+# ============ 模型配置 ============
+# MediaPipe 模型（仅Tasks API需要）
 MODEL_PATH = Path(__file__).parent.parent / "pose_landmarker_heavy.task"
 MODEL_URL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
 

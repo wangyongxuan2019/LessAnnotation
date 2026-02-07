@@ -141,18 +141,37 @@ class ScoringPanel(QScrollArea):
         return {k: (g.id(g.checkedButton()) if g.checkedButton() else None) for k, g in self.button_groups.items()}
 
     def set_scores(self, scores):
+        """设置评分（不触发信号）"""
+        # 先清空所有选择
+        self.clear_scores()
+
+        # 再设置新的值
         for k, v in scores.items():
             if k in self.button_groups and v is not None:
-                btn = self.button_groups[k].button(v)
+                bg = self.button_groups[k]
+                bg.blockSignals(True)  # 阻止信号
+                btn = bg.button(v)
                 if btn:
+                    btn.blockSignals(True)
                     btn.setChecked(True)
+                    btn.blockSignals(False)
+                bg.blockSignals(False)
+
+        # 强制刷新
+        self.update()
 
     def clear_scores(self):
+        """清空所有评分选择"""
         for g in self.button_groups.values():
+            g.blockSignals(True)
             g.setExclusive(False)
             for b in g.buttons():
+                b.blockSignals(True)
                 b.setChecked(False)
+                b.blockSignals(False)
             g.setExclusive(True)
+            g.blockSignals(False)
+        self.update()
 
     def is_complete(self):
         return all(g.checkedButton() for g in self.button_groups.values())
